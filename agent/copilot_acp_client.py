@@ -1,9 +1,10 @@
-"""OpenAI-compatible shim that forwards Hermes requests to `copilot --acp`.
+"""OpenAI-compatible shim that forwards Hermes requests to a local ACP CLI.
 
-This adapter lets Hermes treat the GitHub Copilot ACP server as a chat-style
-backend. Each request starts a short-lived ACP session, sends the formatted
-conversation as a single prompt, collects text chunks, and converts the result
-back into the minimal shape Hermes expects from an OpenAI client.
+Used for GitHub Copilot (`copilot --acp --stdio`) and Cursor Agent (`agent acp`),
+both of which speak Agent Client Protocol JSON-RPC over stdio. Each request
+starts a short-lived ACP session, sends the formatted conversation as a single
+prompt, collects text chunks, and converts the result back into the minimal shape
+Hermes expects from an OpenAI client.
 """
 
 from __future__ import annotations
@@ -267,6 +268,7 @@ class CopilotACPClient:
         acp_cwd: str | None = None,
         command: str | None = None,
         args: list[str] | None = None,
+        backend_label: str | None = None,
         **_: Any,
     ):
         self.api_key = api_key or "copilot-acp"
@@ -275,6 +277,7 @@ class CopilotACPClient:
         self._acp_command = acp_command or command or _resolve_command()
         self._acp_args = list(acp_args or args or _resolve_args())
         self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
+        self._backend_label = (backend_label or "Copilot ACP").strip() or "Copilot ACP"
         self.chat = _ACPChatNamespace(self)
         self.is_closed = False
         self._active_process: subprocess.Popen[str] | None = None
@@ -354,13 +357,13 @@ class CopilotACPClient:
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
-                f"Could not start Copilot ACP command '{self._acp_command}'. "
-                "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+                f"Could not start {self._backend_label} command '{self._acp_command}'. "
+                "Install the CLI or set HERMES_COPILOT_ACP_COMMAND / HERMES_CURSOR_AGENT_COMMAND."
             ) from exc
 
         if proc.stdin is None or proc.stdout is None:
             proc.kill()
-            raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
+            raise RuntimeError(f"{self._backend_label} process did not expose stdin/stdout pipes.")
 
         self.is_closed = False
         with self._active_process_lock:
@@ -425,14 +428,14 @@ class CopilotACPClient:
                 if "error" in msg:
                     err = msg.get("error") or {}
                     raise RuntimeError(
-                        f"Copilot ACP {method} failed: {err.get('message') or err}"
+                        f"{self._backend_label} {method} failed: {err.get('message') or err}"
                     )
                 return msg.get("result")
 
             stderr_text = "\n".join(stderr_tail).strip()
             if proc.poll() is not None and stderr_text:
-                raise RuntimeError(f"Copilot ACP process exited early: {stderr_text}")
-            raise TimeoutError(f"Timed out waiting for Copilot ACP response to {method}.")
+                raise RuntimeError(f"{self._backend_label} process exited early: {stderr_text}")
+            raise TimeoutError(f"Timed out waiting for {self._backend_label} response to {method}.")
 
         try:
             _request(
@@ -461,7 +464,7 @@ class CopilotACPClient:
             ) or {}
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
-                raise RuntimeError("Copilot ACP did not return a sessionId.")
+                raise RuntimeError(f"{self._backend_label} did not return a sessionId.")
 
             text_parts: list[str] = []
             reasoning_parts: list[str] = []

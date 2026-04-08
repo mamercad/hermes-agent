@@ -919,6 +919,7 @@ def select_provider_and_model(args=None):
         "nous": "Nous Portal",
         "openai-codex": "OpenAI Codex",
         "copilot-acp": "GitHub Copilot ACP",
+        "cursor-agent": "Cursor Agent (ACP)",
         "copilot": "GitHub Copilot",
         "anthropic": "Anthropic",
         "gemini": "Google AI Studio",
@@ -953,6 +954,7 @@ def select_provider_and_model(args=None):
 
     extended_providers = [
         ("copilot-acp", "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
+        ("cursor-agent", "Cursor Agent (spawns `agent acp` — Cursor subscription)"),
         ("gemini", "Google AI Studio (Gemini models — OpenAI-compatible endpoint)"),
         ("zai", "Z.AI / GLM (Zhipu AI direct API)"),
         ("kimi-coding", "Kimi / Moonshot (Moonshot AI direct API)"),
@@ -1045,6 +1047,8 @@ def select_provider_and_model(args=None):
         _model_flow_openai_codex(config, current_model)
     elif selected_provider == "copilot-acp":
         _model_flow_copilot_acp(config, current_model)
+    elif selected_provider == "cursor-agent":
+        _model_flow_cursor_agent(config, current_model)
     elif selected_provider == "copilot":
         _model_flow_copilot(config, current_model)
     elif selected_provider == "custom":
@@ -2086,6 +2090,75 @@ def _model_flow_copilot_acp(config, current_model=""):
         catalog=catalog,
         api_key=catalog_api_key,
     ) or selected
+    _save_model_choice(selected)
+
+    cfg = load_config()
+    model = cfg.get("model")
+    if not isinstance(model, dict):
+        model = {"default": model} if model else {}
+        cfg["model"] = model
+    model["provider"] = provider_id
+    model["base_url"] = effective_base
+    model["api_mode"] = "chat_completions"
+    save_config(cfg)
+    deactivate_provider()
+
+    print(f"Default model set to: {selected} (via {pconfig.name})")
+
+
+def _model_flow_cursor_agent(config, current_model=""):
+    """Cursor Agent ACP flow using the local Cursor CLI (`agent acp`)."""
+    from hermes_cli.auth import (
+        PROVIDER_REGISTRY,
+        _prompt_model_selection,
+        _save_model_choice,
+        deactivate_provider,
+        get_external_process_provider_status,
+        resolve_external_process_provider_credentials,
+    )
+    from hermes_cli.config import load_config, save_config
+
+    del config
+
+    provider_id = "cursor-agent"
+    pconfig = PROVIDER_REGISTRY[provider_id]
+
+    status = get_external_process_provider_status(provider_id)
+    resolved_command = status.get("resolved_command") or status.get("command") or "agent"
+    effective_base = status.get("base_url") or pconfig.inference_base_url
+
+    print("  Cursor Agent delegates Hermes turns to `agent acp` (ACP over stdio).")
+    print("  Hermes starts a short-lived ACP subprocess for each request.")
+    print("  Run `agent login` or set CURSOR_API_KEY so the CLI can authenticate.")
+    print(f"  Command: {resolved_command}")
+    print(f"  Backend marker: {effective_base}")
+    print()
+
+    try:
+        creds = resolve_external_process_provider_credentials(provider_id)
+    except Exception as exc:
+        print(f"  ⚠ {exc}")
+        print("  Set HERMES_CURSOR_AGENT_COMMAND if the `agent` binary is not on PATH.")
+        return
+
+    effective_base = creds.get("base_url") or effective_base
+
+    model_list = list(_PROVIDER_MODELS.get("cursor-agent", []))
+    if model_list:
+        selected = _prompt_model_selection(
+            model_list,
+            current_model=current_model,
+        )
+    else:
+        try:
+            selected = input("Model name (e.g. sonnet-4, gpt-5): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            selected = None
+
+    if not selected:
+        print("No change.")
+        return
+
     _save_model_choice(selected)
 
     cfg = load_config()
@@ -4240,7 +4313,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "cursor-agent", "copilot", "anthropic", "gemini", "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode"],
         default=None,
         help="Inference provider (default: auto)"
     )

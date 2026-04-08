@@ -13,6 +13,7 @@ import urllib.request
 import urllib.error
 from difflib import get_close_matches
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
@@ -23,6 +24,29 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 # Backward-compatible aliases for the earlier GitHub Models-backed Copilot work.
 GITHUB_MODELS_BASE_URL = COPILOT_BASE_URL
 GITHUB_MODELS_CATALOG_URL = COPILOT_MODELS_URL
+
+
+def _require_http_https_url(url: str) -> str:
+    """Ensure *url* uses http(s) so urllib cannot open ``file://`` or other schemes."""
+    u = (url or "").strip()
+    parsed = urlparse(u)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(f"URL must be http(s) with a host: {url!r}")
+    return u
+
+
+def _http_get_bytes(
+    url: str,
+    *,
+    timeout: float,
+    headers: Optional[dict[str, str]] = None,
+) -> bytes:
+    """GET over http(s) only; all urllib HTTP reads go through here."""
+    safe = _require_http_https_url(url)
+    req = urllib.request.Request(safe, headers=dict(headers or {}))
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosemgrep
+        return resp.read()
+
 
 # (model_id, display description shown in menus)
 OPENROUTER_MODELS: list[tuple[str, str]] = [
@@ -95,6 +119,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "copilot-acp": [
         "copilot-acp",
     ],
+    "cursor-agent": [
+        "cursor-agent",
+        "auto",
+        "sonnet-4",
+        "opus-4.6",
+        "gpt-5",
+    ],
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -162,6 +193,12 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "MiniMax-M2.7",
     ],
     "anthropic": [
+        # Dotted IDs align with GitHub Copilot / OpenRouter display strings so
+        # bare-name detection prefers Anthropic + OpenRouter remap before Copilot.
+        "claude-opus-4.6",
+        "claude-sonnet-4.6",
+        "claude-sonnet-4.5",
+        "claude-haiku-4.5",
         "claude-opus-4-6",
         "claude-sonnet-4-6",
         "claude-opus-4-5-20251101",
@@ -354,9 +391,7 @@ def fetch_nous_account_tier(access_token: str, portal_base_url: str = "") -> dic
         "Accept": "application/json",
     }
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return json.loads(resp.read().decode())
+        return json.loads(_http_get_bytes(url, timeout=8, headers=headers).decode())
     except Exception:
         return {}
 
@@ -469,6 +504,7 @@ _PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "cursor-agent": "Cursor Agent (ACP)",
     "nous": "Nous Portal",
     "copilot": "GitHub Copilot",
     "gemini": "Google AI Studio",
@@ -498,6 +534,7 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "cursor-acp": "cursor-agent",
     "google": "gemini",
     "google-gemini": "gemini",
     "google-ai-studio": "gemini",
@@ -682,9 +719,7 @@ def fetch_models_with_pricing(
         headers["Authorization"] = f"Bearer {api_key}"
 
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode())
+        payload = json.loads(_http_get_bytes(url, timeout=timeout, headers=headers).decode())
     except Exception:
         _pricing_cache[cache_key] = {}
         return {}
@@ -764,7 +799,7 @@ def list_available_providers() -> list[dict[str, str]]:
     """
     # Canonical providers in display order
     _PROVIDER_ORDER = [
-        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
+        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp", "cursor-agent",
         "gemini", "huggingface",
         "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic", "alibaba",
         "opencode-zen", "opencode-go",
@@ -918,8 +953,11 @@ def detect_provider_for_model(
         return None
 
     # --- Step 1: check static provider catalogs for a direct match ---
+    # Iterate in sorted order so Anthropic/OpenAI-native APIs win over GitHub
+    # Copilot when the same display string appears in both catalogs.
     direct_match: Optional[str] = None
-    for pid, models in _PROVIDER_MODELS.items():
+    for pid in sorted(_PROVIDER_MODELS.keys()):
+        models = _PROVIDER_MODELS[pid]
         if pid == current_provider or pid in _AGGREGATORS:
             continue
         if any(name_lower == m.lower() for m in models):
@@ -1047,6 +1085,8 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
             pass
         if normalized == "copilot-acp":
             return list(_PROVIDER_MODELS.get("copilot", []))
+    if normalized == "cursor-agent":
+        return list(_PROVIDER_MODELS.get("cursor-agent", []))
     if normalized == "nous":
         # Try live Nous Portal /models endpoint
         try:
@@ -1104,21 +1144,19 @@ def _fetch_anthropic_models(timeout: float = 5.0) -> Optional[list[str]]:
     else:
         headers["x-api-key"] = token
 
-    req = urllib.request.Request(
-        "https://api.anthropic.com/v1/models",
-        headers=headers,
-    )
+    anthropic_models_url = "https://api.anthropic.com/v1/models"
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-            models = [m["id"] for m in data.get("data", []) if m.get("id")]
-            # Sort: latest/largest first (opus > sonnet > haiku, higher version first)
-            return sorted(models, key=lambda m: (
-                "opus" not in m,      # opus first
-                "sonnet" not in m,    # then sonnet
-                "haiku" not in m,     # then haiku
-                m,                    # alphabetical within tier
-            ))
+        data = json.loads(
+            _http_get_bytes(anthropic_models_url, timeout=timeout, headers=headers).decode()
+        )
+        models = [m["id"] for m in data.get("data", []) if m.get("id")]
+        # Sort: latest/largest first (opus > sonnet > haiku, higher version first)
+        return sorted(models, key=lambda m: (
+            "opus" not in m,      # opus first
+            "sonnet" not in m,    # then sonnet
+            "haiku" not in m,     # then haiku
+            m,                    # alphabetical within tier
+        ))
     except Exception as e:
         import logging
         logging.getLogger(__name__).debug("Failed to fetch Anthropic models: %s", e)
@@ -1195,23 +1233,23 @@ def fetch_github_model_catalog(
     attempts.append(copilot_default_headers())
 
     for headers in attempts:
-        req = urllib.request.Request(COPILOT_MODELS_URL, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-                items = _payload_items(data)
-                models: list[dict[str, Any]] = []
-                seen_ids: set[str] = set()
-                for item in items:
-                    if not _copilot_catalog_item_is_text_model(item):
-                        continue
-                    model_id = str(item.get("id") or "").strip()
-                    if not model_id or model_id in seen_ids:
-                        continue
-                    seen_ids.add(model_id)
-                    models.append(item)
-                if models:
-                    return models
+            data = json.loads(
+                _http_get_bytes(COPILOT_MODELS_URL, timeout=timeout, headers=headers).decode()
+            )
+            items = _payload_items(data)
+            models: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            for item in items:
+                if not _copilot_catalog_item_is_text_model(item):
+                    continue
+                model_id = str(item.get("id") or "").strip()
+                if not model_id or model_id in seen_ids:
+                    continue
+                seen_ids.add(model_id)
+                models.append(item)
+            if models:
+                return models
         except Exception:
             continue
     return None
@@ -1513,17 +1551,15 @@ def probe_api_models(
     for candidate_base, is_fallback in candidates:
         url = candidate_base.rstrip("/") + "/models"
         tried.append(url)
-        req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-                return {
-                    "models": [m.get("id", "") for m in data.get("data", [])],
-                    "probed_url": url,
-                    "resolved_base_url": candidate_base.rstrip("/"),
-                    "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
-                    "used_fallback": is_fallback,
-                }
+            data = json.loads(_http_get_bytes(url, timeout=timeout, headers=headers).decode())
+            return {
+                "models": [m.get("id", "") for m in data.get("data", [])],
+                "probed_url": url,
+                "resolved_base_url": candidate_base.rstrip("/"),
+                "suggested_base_url": alternate_base if alternate_base != candidate_base else normalized,
+                "used_fallback": is_fallback,
+            }
         except Exception:
             continue
 
@@ -1548,17 +1584,15 @@ def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
 
     url = base_url.rstrip("/") + "/models"
     headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"}
-    req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode())
-            return [
-                m["id"]
-                for m in data.get("data", [])
-                if m.get("id")
-                and m.get("type") == "language"
-                and "tool-use" in (m.get("tags") or [])
-            ]
+        data = json.loads(_http_get_bytes(url, timeout=timeout, headers=headers).decode())
+        return [
+            m["id"]
+            for m in data.get("data", [])
+            if m.get("id")
+            and m.get("type") == "language"
+            and "tool-use" in (m.get("tags") or [])
+        ]
     except Exception:
         return None
 

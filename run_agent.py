@@ -738,7 +738,7 @@ class AIAgent:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
-                if self.provider == "copilot-acp":
+                if self.provider in ("copilot-acp", "cursor-agent"):
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
                 effective_base = base_url
@@ -3546,12 +3546,20 @@ class AIAgent:
         return False
 
     def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
-        if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
+        _bu = str(client_kwargs.get("base_url", "") or "")
+        _is_copilot_acp = self.provider == "copilot-acp" or _bu.startswith("acp://copilot")
+        _is_cursor_acp = self.provider == "cursor-agent" or _bu.startswith("acp://cursor")
+        if _is_copilot_acp or _is_cursor_acp:
             from agent.copilot_acp_client import CopilotACPClient
 
+            if _is_cursor_acp:
+                client_kwargs.setdefault("backend_label", "Cursor Agent ACP")
+            else:
+                client_kwargs.setdefault("backend_label", "GitHub Copilot ACP")
             client = CopilotACPClient(**client_kwargs)
             logger.info(
-                "Copilot ACP client created (%s, shared=%s) %s",
+                "%s client created (%s, shared=%s) %s",
+                client_kwargs.get("backend_label", "ACP"),
                 reason,
                 shared,
                 self._client_log_context(),

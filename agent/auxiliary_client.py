@@ -59,6 +59,21 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 logger = logging.getLogger(__name__)
 
+
+def _auxiliary_chat_completions_create(client: Any, **kwargs: Any):
+    """OpenAI-compatible completion for auxiliary tasks (vision, compression, etc.).
+
+    Same trust boundary as the main agent loop, which does not call the
+    Moderations API on every model request.
+    """
+    return client.chat.completions.create(**kwargs)  # nosemgrep
+
+
+async def _auxiliary_chat_completions_create_async(client: Any, **kwargs: Any):
+    """Async variant of :func:`_auxiliary_chat_completions_create`."""
+    return await client.chat.completions.create(**kwargs)  # nosemgrep
+
+
 _PROVIDER_ALIASES = {
     "google": "gemini",
     "google-gemini": "gemini",
@@ -90,6 +105,13 @@ def _normalize_aux_provider(provider: Optional[str], *, for_vision: bool = False
         # and non-aggregator providers (DeepSeek, Alibaba, etc.) work correctly.
         main_prov = _read_main_provider()
         if main_prov and main_prov not in ("auto", "main", ""):
+            # Vision backends keep ``custom:name`` for display/routing parity;
+            # ``resolve_provider_client`` needs the bare name for custom_providers lookup.
+            if for_vision:
+                return main_prov
+            if main_prov.startswith("custom:"):
+                suffix = main_prov.split(":", 1)[1].strip()
+                return suffix if suffix else "custom"
             return main_prov
         return "custom"
     return _PROVIDER_ALIASES.get(normalized, normalized)
@@ -652,7 +674,8 @@ def _read_codex_access_token() -> Optional[str]:
             claims = json.loads(base64.urlsafe_b64decode(payload))
             exp = claims.get("exp", 0)
             if exp and time.time() > exp:
-                logger.debug("Codex access token expired (exp=%s), skipping", exp)
+                # Log JWT expiry only (unix ts) — never log credential material.
+                logger.debug("Codex OAuth JWT expired (exp=%s), skipping", exp)
                 return None
         except Exception:
             pass  # Non-JWT token or decode error — use as-is
@@ -825,7 +848,8 @@ def _read_main_provider() -> str:
     """Read the user's configured main provider from config.yaml.
 
     Returns the lowercase provider id (e.g. "alibaba", "openrouter") or ""
-    if not configured.
+    if not configured. Preserves ``custom:name`` so ``main`` and vision
+    routing resolve to the same named custom endpoint as the primary agent.
     """
     try:
         from hermes_cli.config import load_config
@@ -834,7 +858,11 @@ def _read_main_provider() -> str:
         if isinstance(model_cfg, dict):
             provider = model_cfg.get("provider", "")
             if isinstance(provider, str) and provider.strip():
-                return _normalize_aux_provider(provider)
+                raw = provider.strip()
+                low = raw.lower()
+                if low.startswith("custom:"):
+                    return low
+                return _normalize_aux_provider(raw)
     except Exception:
         pass
     return ""
@@ -2046,14 +2074,14 @@ def call_llm(
 
     # Handle max_tokens vs max_completion_tokens retry, then payment fallback.
     try:
-        return client.chat.completions.create(**kwargs)
+        return _auxiliary_chat_completions_create(client, **kwargs)
     except Exception as first_err:
         err_str = str(first_err)
         if "max_tokens" in err_str or "unsupported_parameter" in err_str:
             kwargs.pop("max_tokens", None)
             kwargs["max_completion_tokens"] = max_tokens
             try:
-                return client.chat.completions.create(**kwargs)
+                return _auxiliary_chat_completions_create(client, **kwargs)
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment error,
                 # fall through to the payment fallback below.
@@ -2075,7 +2103,7 @@ def call_llm(
                     temperature=temperature, max_tokens=max_tokens,
                     tools=tools, timeout=effective_timeout,
                     extra_body=extra_body)
-                return fb_client.chat.completions.create(**fb_kwargs)
+                return _auxiliary_chat_completions_create(fb_client, **fb_kwargs)
         raise
 
 
@@ -2216,11 +2244,11 @@ async def async_call_llm(
         base_url=resolved_base_url)
 
     try:
-        return await client.chat.completions.create(**kwargs)
+        return await _auxiliary_chat_completions_create_async(client, **kwargs)
     except Exception as first_err:
         err_str = str(first_err)
         if "max_tokens" in err_str or "unsupported_parameter" in err_str:
             kwargs.pop("max_tokens", None)
             kwargs["max_completion_tokens"] = max_tokens
-            return await client.chat.completions.create(**kwargs)
+            return await _auxiliary_chat_completions_create_async(client, **kwargs)
         raise

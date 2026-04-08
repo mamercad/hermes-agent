@@ -159,6 +159,7 @@ class TestProviderLabel:
         assert provider_label("kimi") == "Kimi / Moonshot"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
+        assert provider_label("cursor-agent") == "Cursor Agent (ACP)"
         assert provider_label("auto") == "Auto"
 
     def test_unknown_provider_preserves_original_name(self):
@@ -196,6 +197,11 @@ class TestProviderModelIds:
 
         assert "gpt-5.4" in ids
         assert "copilot-acp" not in ids
+
+    def test_cursor_agent_returns_static_hints(self):
+        ids = provider_model_ids("cursor-agent")
+        assert "cursor-agent" in ids
+        assert "sonnet-4" in ids
 
 
 # -- fetch_api_models --------------------------------------------------------
